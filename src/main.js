@@ -124,7 +124,8 @@ class ParticleSystem {
         }
     };
 
-    WebAssembly.instantiateStreaming(fetch('/physics.wasm'), importObject)
+    const wasmPath = import.meta.env.BASE_URL + 'physics.wasm';
+    this.wasmPromise = WebAssembly.instantiateStreaming(fetch(wasmPath), importObject)
         .then(result => {
             this.wasmExports = result.instance.exports;
             
@@ -178,7 +179,8 @@ class ParticleSystem {
     this.workerCount = Math.max(1, navigator.hardwareConcurrency - 1);
     this.workers = [];
 
-    const response = await fetch('/physics.wasm');
+    const wasmPath = import.meta.env.BASE_URL + 'physics.wasm';
+    const response = await fetch(wasmPath);
     const wasmModule = await WebAssembly.compile(await response.arrayBuffer());
     const bPA = this.max * 4; // bytesPerArray
 
