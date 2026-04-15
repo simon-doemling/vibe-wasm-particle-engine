@@ -18,6 +18,47 @@ let gridCols: i32;
 let gridRows: i32;
 let invCellSize: f32;
 
+// --- NEUER POINTER FÜR DIE SORTIERUNG ---
+let ptr_sortBuffer: usize;
+
+export function initSortBuffer(ptr: usize): void {
+    ptr_sortBuffer = ptr;
+}
+
+// Hilfsfunktion: Sortiert ein einzelnes Array anhand des Grids
+@inline
+function sortAttribute(ptr_attr: usize, count: i32): void {
+    // 1. Gather (Sammeln): Lies kreuz und quer, schreibe strikt linear
+    for (let i = 0; i < count; i++) {
+        let oldId = load<i32>(ptr_particleIndex + i * 4);
+        let val = load<f32>(ptr_attr + oldId * 4);
+        store<f32>(ptr_sortBuffer + i * 4, val);
+    }
+
+    // 2. Fast Block Copy: Kopiere den sortierten Buffer zurück ins Original-Array
+    // memory.copy(ziel, quelle, anzahl_bytes) ist ein nativer, rasend schneller WASM-Befehl
+    memory.copy(ptr_attr, ptr_sortBuffer, count * 4);
+}
+
+// Die Hauptfunktion, die von JS aufgerufen wird
+export function sortDataForCache(count: i32): void {
+    // Alle physikalischen Eigenschaften umsortieren
+    sortAttribute(ptr_x, count);
+    sortAttribute(ptr_y, count);
+    sortAttribute(ptr_vx, count);
+    sortAttribute(ptr_vy, count);
+    sortAttribute(ptr_r, count);
+    sortAttribute(ptr_invMass, count);
+    sortAttribute(ptr_temp, count);
+
+    // WICHTIGSTER SCHRITT: 
+    // Da die Partikel nun physisch im Speicher exakt in Grid-Reihenfolge liegen,
+    // können wir den Index-Pointer einfach auf 0, 1, 2, 3... setzen.
+    for (let i = 0; i < count; i++) {
+        store<i32>(ptr_particleIndex + i * 4, i);
+    }
+}
+
 // ==========================================
 // --- INITIALISIERUNG ---
 // ==========================================

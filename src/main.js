@@ -54,125 +54,133 @@ const fragmentShader = `
 
 // --- DAS SYSTEM ---
 class ParticleSystem {
-  constructor(width, height, maxParticles, cellWidth) {
-    this.max   = maxParticles;
-    this.cellWidth = cellWidth;
-    this.count = 0;
-    
-    // --- 1. SPEICHERBEDARF BERECHNEN ---
-    const bytesPerArray = maxParticles * 4;
-    const physicsBytes  = bytesPerArray * 8; // x, y, vx, vy, r, mass, invMass, temp
+    constructor(width, height, maxParticles, cellWidth) {
+        this.max   = maxParticles;
+        this.cellWidth = cellWidth;
+        this.count = 0;
+        
+        // --- 1. SPEICHERBEDARF BERECHNEN ---
+        const bytesPerArray = maxParticles * 4;
+        const physicsBytes  = bytesPerArray * 8; // x, y, vx, vy, r, mass, invMass, temp
 
-    // Grid-Dimensionen berechnen
-    this.COLS = Math.floor(width / cellWidth) + 1;
-    this.ROWS = Math.floor(height / cellWidth) + 1;
-    const totalCells = this.COLS * this.ROWS;
+        // Grid-Dimensionen berechnen
+        this.COLS = Math.floor(width / cellWidth) + 1;
+        this.ROWS = Math.floor(height / cellWidth) + 1;
+        const totalCells = this.COLS * this.ROWS;
 
-    // Grid-Strukturen (32-Bit Integer)
-    const countBytes  = totalCells * 4;         // cellCount
-    const startBytes  = (totalCells + 1) * 4;   // cellStart
-    const indexBytes  = maxParticles * 4;       // particleIndex
-    const tempBytes   = totalCells * 4;         // tempCount
+        // Grid-Strukturen (32-Bit Integer)
+        const countBytes  = totalCells * 4;         // cellCount
+        const startBytes  = (totalCells + 1) * 4;   // cellStart
+        const indexBytes  = maxParticles * 4;       // particleIndex
+        const tempBytes   = totalCells * 4;         // tempCount
 
-    // NEU: Render-Buffer für SIMD-Interleaving (x,y pro Partikel = 8 Bytes)
-    const renderBufferBytes = maxParticles * 8; 
+        // Render-Buffer für SIMD-Interleaving (x,y pro Partikel = 8 Bytes)
+        const renderBufferBytes = maxParticles * 8; 
 
-    // Gesamten Speicherbedarf summieren
-    const totalBytesNeeded = physicsBytes + countBytes + startBytes + indexBytes + tempBytes + renderBufferBytes;
-    
-    // Speicher anfordern
-    const fixedPages = 2560; 
-    this.wasmMemory = new WebAssembly.Memory({ 
-        initial: fixedPages, 
-        maximum: fixedPages, // Bei Shared Memory muss das identisch sein
-        shared: true 
-    });
-    const buffer    = this.wasmMemory.buffer;
+        // NEU: Temporärer Buffer für die Array-Sortierung (1 Float pro Partikel = 4 Bytes)
+        const sortBufferBytes = maxParticles * 4;
 
-    // --- 2. POINTER ZUWEISEN (Lineares Layout) ---
-    let byteOffset = 0;
+        // Gesamten Speicherbedarf summieren
+        const totalBytesNeeded = physicsBytes + countBytes + startBytes + indexBytes + tempBytes + renderBufferBytes + sortBufferBytes;
+        
+        // Speicher anfordern
+        // 2560 Pages = ~160 MB. Das reicht locker auch für 1.000.000 Partikel (braucht ca. 60-80 MB je nach Auflösung)
+        const fixedPages = 2560; 
+        this.wasmMemory = new WebAssembly.Memory({ 
+            initial: fixedPages, 
+            maximum: fixedPages, // Bei Shared Memory muss das identisch sein
+            shared: true 
+        });
+        const buffer    = this.wasmMemory.buffer;
 
-    // Physikalische Eigenschaften
-    this.x       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.y       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.vx      = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.vy      = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.r       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.mass    = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.invMass = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
-    this.temp    = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        // --- 2. POINTER ZUWEISEN (Lineares Layout) ---
+        let byteOffset = 0;
 
-    // Grid Pointer
-    const ptr_cellCount     = byteOffset; byteOffset += countBytes;
-    const ptr_cellStart     = byteOffset; byteOffset += startBytes;
-    const ptr_particleIndex = byteOffset; byteOffset += indexBytes;
-    const ptr_tempCount     = byteOffset; byteOffset += tempBytes;
+        // Physikalische Eigenschaften
+        this.x       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.y       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.vx      = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.vy      = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.r       = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.mass    = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.invMass = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
+        this.temp    = new Float32Array(buffer, byteOffset, maxParticles); byteOffset += bytesPerArray;
 
-    // Render-Buffer Pointer (für den ReferenceError-Fix)
-    const ptr_renderBuffer  = byteOffset; byteOffset += renderBufferBytes;
+        // Grid Pointer
+        const ptr_cellCount     = byteOffset; byteOffset += countBytes;
+        const ptr_cellStart     = byteOffset; byteOffset += startBytes;
+        const ptr_particleIndex = byteOffset; byteOffset += indexBytes;
+        const ptr_tempCount     = byteOffset; byteOffset += tempBytes;
 
-    // --- 3. ZERO-COPY MAPPING ---
-    // Wir mappen die JavaScript-Sicht direkt auf den WASM-Render-Buffer
-    this.instancePosBuffer = new Float32Array(buffer, ptr_renderBuffer, maxParticles * 2);
+        // Render-Buffer Pointer
+        const ptr_renderBuffer  = byteOffset; byteOffset += renderBufferBytes;
 
-    // --- 4. WASM LADEN & INITIALISIEREN ---
-    this.wasmReady = false; 
-    const importObject = {
-        env: {
-            memory: this.wasmMemory,
-            abort: (msg, file, line) => console.error(`Wasm Error at ${line}`)
-        }
-    };
+        // NEU: Pointer für den Sortier-Buffer
+        const ptr_sortBuffer    = byteOffset; byteOffset += sortBufferBytes;
 
-    const wasmPath = import.meta.env.BASE_URL + 'physics.wasm';
-    this.wasmPromise = WebAssembly.instantiateStreaming(fetch(wasmPath), importObject)
-        .then(result => {
-            this.wasmExports = result.instance.exports;
-            
-            // Pointer für Physik (x=0, y=1*bPA, ... invMass=6*bPA, temp=7*bPA)
-            this.wasmExports.initPointers(
-                0, bytesPerArray, bytesPerArray*2, bytesPerArray*3, 
-                bytesPerArray*4, bytesPerArray*6, bytesPerArray*7
-            );
-            
-            // Pointer für Grid
-            this.wasmExports.initGrid(
-                ptr_cellCount, ptr_cellStart, ptr_particleIndex, ptr_tempCount, 
-                this.COLS, this.ROWS, cellWidth
-            );
+        // --- 3. ZERO-COPY MAPPING ---
+        this.instancePosBuffer = new Float32Array(buffer, ptr_renderBuffer, maxParticles * 2);
 
-            // Pointer für Render-Shuffle
-            this.wasmExports.initRenderPointer(ptr_renderBuffer);
+        // --- 4. WASM LADEN & INITIALISIEREN ---
+        this.wasmReady = false; 
+        const importObject = {
+            env: {
+                memory: this.wasmMemory,
+                abort: (msg, file, line) => console.error(`Wasm Error at ${line}`)
+            }
+        };
 
-            this.wasmReady = true;
-            console.log("WASM SYSTEM OPERATIONAL! 🚀");
+        const wasmPath = import.meta.env.BASE_URL + 'physics.wasm';
+        this.wasmPromise = WebAssembly.instantiateStreaming(fetch(wasmPath), importObject)
+            .then(result => {
+                this.wasmExports = result.instance.exports;
+                
+                // Pointer für Physik
+                this.wasmExports.initPointers(
+                    0, bytesPerArray, bytesPerArray*2, bytesPerArray*3, 
+                    bytesPerArray*4, bytesPerArray*6, bytesPerArray*7
+                );
+                
+                // Pointer für Grid
+                this.wasmExports.initGrid(
+                    ptr_cellCount, ptr_cellStart, ptr_particleIndex, ptr_tempCount, 
+                    this.COLS, this.ROWS, cellWidth
+                );
+
+                // Pointer für Render-Shuffle
+                this.wasmExports.initRenderPointer(ptr_renderBuffer);
+
+                // NEU: Pointer für die Sortierung übergeben
+                this.wasmExports.initSortBuffer(ptr_sortBuffer);
+
+                this.wasmReady = true;
+                console.log("WASM SYSTEM OPERATIONAL! 🚀");
+            });
+
+        // --- 5. PIXI RENDERING SETUP ---
+        this.posBuffer  = new Buffer({ data: this.instancePosBuffer, usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+        this.radBuffer  = new Buffer({ data: this.r,                 usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+        this.tempBuffer = new Buffer({ data: this.temp,              usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+
+        this.geometry = new Geometry({
+            attributes: {
+                aPosition:       { buffer: new Buffer({ data: new Float32Array([-1,-1, 1,-1, 1,1, -1,1]) }), format: 'float32x2' },
+                aInstancePos:    { buffer: this.posBuffer,  format: 'float32x2', instance: true },
+                aInstanceRadius: { buffer: this.radBuffer,  format: 'float32',   instance: true },
+                aInstanceTemp:   { buffer: this.tempBuffer, format: 'float32',   instance: true },
+            },
+            indexBuffer: new Buffer({
+                data: new Uint16Array([0,1,2,0,2,3]),
+                usage: BufferUsage.INDEX
+            }),
         });
 
-    // --- 5. PIXI RENDERING SETUP ---
-    // Wichtig: Wir nutzen hier die 'this.instancePosBuffer' View von oben!
-    this.posBuffer  = new Buffer({ data: this.instancePosBuffer, usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
-    this.radBuffer  = new Buffer({ data: this.r,                 usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
-    this.tempBuffer = new Buffer({ data: this.temp,              usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
-
-    this.geometry = new Geometry({
-        attributes: {
-            aPosition:       { buffer: new Buffer({ data: new Float32Array([-1,-1, 1,-1, 1,1, -1,1]) }), format: 'float32x2' },
-            aInstancePos:    { buffer: this.posBuffer,  format: 'float32x2', instance: true },
-            aInstanceRadius: { buffer: this.radBuffer,  format: 'float32',   instance: true },
-            aInstanceTemp:   { buffer: this.tempBuffer, format: 'float32',   instance: true },
-        },
-        indexBuffer: new Buffer({
-            data: new Uint16Array([0,1,2,0,2,3]),
-            usage: BufferUsage.INDEX
-        }),
-    });
-
-    this.geometry.instanceCount = 0;
-    const shader = Shader.from({ gl: { vertex: vertexShader, fragment: fragmentShader } });
-    this.mesh = new Mesh({ geometry: this.geometry, shader });
-    this.mesh.cullable = false;
-    app.stage.addChild(this.mesh);
-  }
+        this.geometry.instanceCount = 0;
+        const shader = Shader.from({ gl: { vertex: vertexShader, fragment: fragmentShader } });
+        this.mesh = new Mesh({ geometry: this.geometry, shader });
+        this.mesh.cullable = false;
+        app.stage.addChild(this.mesh);
+    }
 
   // --- NEUE METHODE: WORKER SPAWNEN ---
   async initThreads() {
@@ -421,6 +429,7 @@ async function startEngine() {
   let allTimer       = new Timer().startCollection();
   let movementTimer  = new Timer().startCollection();
   let gridBuildTimer = new Timer().startCollection();
+  let sortTimer      = new Timer().startCollection();
   let collisionTimer = new Timer().startCollection();
   let drawTimer      = new Timer().startCollection();
   let restTimer      = new Timer().startCollection();
@@ -482,6 +491,10 @@ async function startEngine() {
     //system.rebuildGrid();
     gridBuildTimer.stop();
 
+    sortTimer.start();
+    system.wasmExports.sortDataForCache(system.count);
+    sortTimer.stop();
+
     collisionTimer.start();
     // Wir rufen eine neue Methode auf, die die 4 Phasen steuert
     await system.checkCollisionsCheckerboard(); 
@@ -501,10 +514,11 @@ async function startEngine() {
     const maxFPS = Math.round(1000 / (allMinMS > 0 ? allMinMS : 0.01));
 
     const movementMS   = movementTimer.getAvgMillis().toFixed(2);
-    const gridBuildMS   = gridBuildTimer.getAvgMillis().toFixed(2);
-    const collisionMS   = collisionTimer.getAvgMillis().toFixed(2);
-    const drawMS     = drawTimer.getAvgMillis().toFixed(2);
-    const restMS     = restTimer.getAvgMillis().toFixed(2);
+    const gridBuildMS  = gridBuildTimer.getAvgMillis().toFixed(2);
+    const sortMS       = sortTimer.getAvgMillis().toFixed(2);
+    const collisionMS  = collisionTimer.getAvgMillis().toFixed(2);
+    const drawMS       = drawTimer.getAvgMillis().toFixed(2);
+    const restMS       = restTimer.getAvgMillis().toFixed(2);
 
     infoText.text = `
     Partikel: ${amount}
@@ -513,6 +527,7 @@ async function startEngine() {
     FPS min: ${minFPS}
     Movement: ${movementMS}
     Build grid: ${gridBuildMS}
+    Sorting: ${sortMS}
     Collision: ${collisionMS}
     Draw: ${drawMS}
     Rest: ${restMS}
