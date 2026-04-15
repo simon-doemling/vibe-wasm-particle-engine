@@ -435,7 +435,7 @@ async function startEngine() {
   let restTimer      = new Timer().startCollection();
   let amount = 500000;
 
-  const system = new ParticleSystem(width, height, amount, maxR * 2);
+  const system = new ParticleSystem(width, height, amount, maxR * 2.0);
   await system.initThreads();
 
   for (let i = 0; i < amount; i++) {
@@ -468,10 +468,12 @@ async function startEngine() {
   console.log(navigator.hardwareConcurrency);
 
   let isProcessing = false;
+  let frameCount = 0;
 
   app.ticker.add(async (ticker) => {
     if (isProcessing) return; // Wenn der letzte Frame noch rechnet: Überspringen!
     isProcessing = true;
+    frameCount++;
 
     restTimer.stop();
 
@@ -488,15 +490,14 @@ async function startEngine() {
 
     gridBuildTimer.start();
     await system.rebuildGridParallel();
-    //system.rebuildGrid();
     gridBuildTimer.stop();
 
     sortTimer.start();
-    system.wasmExports.sortDataForCache(system.count);
+    if (frameCount % 15 === 0)
+        system.wasmExports.sortDataForCache(system.count);
     sortTimer.stop();
 
     collisionTimer.start();
-    // Wir rufen eine neue Methode auf, die die 4 Phasen steuert
     await system.checkCollisionsCheckerboard(); 
     collisionTimer.stop();
 
